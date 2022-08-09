@@ -1,0 +1,1090 @@
+---
+title: "Stars*EU"
+subtitle: "Data Visualize - Static"
+author: "Lorena Abad"
+date: "14.07.2022 updated: `r format(Sys.time(), '%d.%m.%Y')`"
+always_allow_html: true
+output: 
+  github_document: default
+  html_document: 
+    code_folding: hide
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, eval = FALSE, fig.showtext = T)
+```
+
+# Read DB data
+
+We will first, as usual, connect to the database to be able to access the created tables. 
+
+```{r conn_details, eval = TRUE, message = FALSE, warning = FALSE}
+library(DBI)
+library(RPostgres)
+db_name = "starsEU"
+local_host = "localhost"
+port_num = 5432
+user_name = "postgres"
+## Create connection to DB
+connection = dbConnect(
+  Postgres(), 
+  dbname = db_name,
+  host = local_host, 
+  port = port_num,
+  user = user_name, 
+  password = rstudioapi::askForPassword("Database password")
+)
+
+## Test if connection is successful
+ifelse(
+  !dbExistsTable(connection, "test"),
+  "The connection to the database was not possible.",
+  "The connection to the database was successful!"
+)
+```
+Reading the data now should not be much effort, you can expand the code below: 
+
+```{r}
+hei = dbReadTable(connection, "hei")
+library(sf)
+hei_sf = st_read(connection, "hei", geometry_column = "geometry")
+curricula = dbReadTable(connection, "curricula")
+courses = dbReadTable(connection, "courses")
+```
+
+```{r}
+dbDisconnect(connection)
+```
+
+We can combine all the information of the three tables into one single table to pick information for the sunburst visualization: 
+
+```{r, message = FALSE, warning = FALSE, fig.showtext=TRUE}
+extrafont::loadfonts(device = "win")
+library(tidyverse)
+library(ggplot2)
+library(geomtextpath)
+library(data.table)
+library(ggtext)
+
+# library(ggfx)
+courses = left_join(courses, curricula) %>% 
+  left_join(hei)  %>% 
+  mutate(
+    across(
+      steam_category,
+      .fns = str_to_sentence
+    )) %>% 
+  filter(
+    !is.na(credits)  
+  )
+
+steamt_palette = c(
+  "#3789C9",
+  "#5560A3",
+  "#24589b",
+  "#D0CECE",
+  "#4E9EC7",
+  "#FDEA14"
+)
+
+coorpfont = "Calibri"
+```
+
+# Function to generate sunbursts by giving a curricula_id
+
+```{r, fig.showtext=TRUE}
+sunburst_plot = function(id,
+                         fontsizescale = 1,
+                         labelabb = FALSE) {
+  courses_sum = courses %>% 
+    filter(curricula_id == id) %>% 
+    fill(hei_name, curricula_name,
+         .direction = "down") %>%
+    mutate(
+    curricula_name = str_replace_all(curricula_name, "MSc", "M.Sc.")
+    ) %>%
+  mutate(
+    curricula_name = str_replace_all(curricula_name, "BSc", "B.Sc.")
+    ) %>%
+  mutate(
+    curricula_name = str_replace_all(curricula_name, "LLM", "LL.M.")
+    ) %>%
+    mutate(
+      across(
+        starts_with("knowledge_"),
+        .fns = str_to_sentence
+      ),
+      ## To sort although it does not work with sunburstR
+      steam_factor = fct_relevel(
+        fct_expand(
+          steam_category, 
+          "Science", "Technology", 
+          "Engineering", "Arts",
+          "Mathematics", "Transversal"
+        ),
+        "Science", "Technology", "Engineering",
+        "Arts", "Mathematics", "Transversal"
+      ),
+      label = str_c(curricula_name, hei_name, sep = " | "),
+      color = case_when(
+        steam_category == "Technology" ~ "#5560A3",
+        steam_category == "Mathematics" ~ "#4E9EC7",
+        steam_category == "Science" ~ "#3789C9",
+        steam_category == "Engineering" ~ "#24589b",#"#0C4690",
+        steam_category == "Arts" ~ "#D0CECE",
+        steam_category == "Transversal" ~ "#FDEA14"
+      )
+    ) %>%
+    group_by(steam_factor, knowledge_domain,
+             knowledge_area, label, color) %>%
+    summarize(
+      credits = sum(credits, na.rm = TRUE)
+    ) %>% 
+    ungroup()
+  
+  lev1 = courses_sum %>% 
+    group_by(steam_factor, color) %>% 
+    summarise(
+      tot_credits1 = sum(credits)
+    ) %>% 
+    ungroup() %>% 
+    mutate(
+      ymax = cumsum(tot_credits1), 
+      ymin = lag(ymax, n = 1, default = 0), 
+      ylab = (ymax+ymin)/2
+    ) %>% 
+    mutate(
+      steam_factor_abb= case_when(
+        steam_factor == "Science" ~ "Sc.",
+        steam_factor == "Technology" ~ "Tech.",
+        steam_factor == "Engineering" ~ "Eng.",
+        steam_factor == "Arts" ~ "Arts",
+        steam_factor == "Mathematics" ~ "Math.",
+        steam_factor == "Transversal" ~ "Trans."
+      ),
+      label = paste0(
+          steam_factor,
+          "\n(ECTS: ", tot_credits1, ")"),
+      label_nocred = steam_factor, 
+      label_abb = paste0(
+          steam_factor_abb,
+          "\n(", tot_credits1, ")"),
+    )
+  
+  # setDT(lev1)[tot_credits1 <= 2, label := LETTERS[.I]]
+  
+  if (nrow(lev1) == 1) {
+      lev1 = lev1 %>% add_row(
+        steam_factor = " ", tot_credits1 = 0,
+        ymin = lev1$ymax, ymax = lev1$ymax, 
+        ylab = lev1$ylab, 
+        label = " ", label_nocred = " ",
+        color = "white"
+      )
+  }
+
+  lev2 = courses_sum %>% 
+    group_by(steam_factor, knowledge_domain, color) %>% 
+    summarise(
+      tot_credits2 = sum(credits)
+    ) %>% 
+    left_join(
+      select(
+        lev1, 
+        steam_factor,
+        tot_credits1,
+        color
+      )
+    ) %>% 
+    ungroup() %>% 
+    mutate(
+      ymax = cumsum(tot_credits2), 
+      ymin = lag(ymax, n = 1, default = 0) ,
+      ylab = (ymax+ymin)/2
+    ) %>% 
+    filter(!is.na(knowledge_domain))
+  
+  # setDT(lev2)[tot_credits2 <= 3, label := letters[.I]]
+  lev2 = lev2 %>% mutate(
+    knowledge_domain_abb = case_when(
+      knowledge_domain == "Humanities" ~ "Hum.",
+      knowledge_domain == "Management" ~ "Mgmt.",
+      knowledge_domain == "Innovation" ~ "Innov.",
+      knowledge_domain == "Statistics" ~ "Stats.",
+      knowledge_domain == "Analysis" ~ "Analy--\nsis",
+      knowledge_domain == "Mechatronics" ~ "Mecha--\ntronics",
+      knowledge_domain == "Business and economics" ~ "Bus. & Ec.",
+      knowledge_domain == "Internship" ~ "Interns.",
+      knowledge_domain == "Aerospace engineering" ~ "Aerospace Eng.",
+      knowledge_domain == "Electrical engineering" ~ "Elec. Eng.",
+      knowledge_domain == "Sustainability" ~ "Sust.",
+      knowledge_domain == "Manufacturing" ~ "Manuf.",
+      knowledge_domain == "Calculus" ~ "Calc.",
+      knowledge_domain == "Algebra" ~ "Alg.",
+      knowledge_domain == "Social sciences" ~ "Social sc.",
+      knowledge_domain == "System science" ~ "Syst. sc.",
+      knowledge_domain == "Environmental science" ~ "Env. sc.",
+      TRUE ~ knowledge_domain
+    ),
+      label = case_when(
+        100*tot_credits2/sum(tot_credits1) <= 4 ~ paste0(
+          str_wrap(knowledge_domain, 10),
+          "\n(ECTS: ", tot_credits2, ")"),
+        TRUE ~ paste0(
+          knowledge_domain,
+          "\n(ECTS: ", tot_credits2, ")")),
+      label_nocred = case_when(
+        100*tot_credits2/sum(tot_credits1) <= 4 ~ 
+          str_wrap(knowledge_domain, 10),
+        TRUE ~ knowledge_domain),
+      label_abb = paste0(
+          str_replace_all(knowledge_domain_abb," ", "\n"),
+          "\n(", tot_credits2, ")")
+    ) 
+  
+  if (nrow(lev2) == 1) {
+    lev2 = lev2 %>% add_row(
+      steam_factor = " ", 
+      knowledge_domain = " ",
+      tot_credits1 = 0,
+      tot_credits2 = 0,
+      ymin = lev2$ymax, ymax = lev2$ymax, 
+      ylab = lev2$ylab, 
+      label = " ", label_nocred = " ",
+      color = "white"
+    )
+  }
+  
+  lev3 = courses_sum %>% 
+    group_by(
+      steam_factor,
+      knowledge_domain,
+      knowledge_area,
+      color
+    ) %>% 
+    summarise(
+      tot_credits3 = sum(credits)
+    ) %>% 
+    left_join(
+      select(
+        lev2,
+        steam_factor,
+        knowledge_domain,
+        tot_credits1,
+        tot_credits2,
+        color
+      )
+    ) %>% 
+    ungroup() %>% 
+    mutate(
+      ymax = cumsum(tot_credits3), 
+      ymin = lag(ymax, n = 1, default = 0),
+      ylab = (ymax+ymin)/2
+    ) %>% 
+    filter(!is.na(knowledge_area))
+  
+  # setDT(lev3)[tot_credits3 <= 2, label := LETTERS[.I]]
+  lev3 = lev3 %>% mutate(
+      knowledge_area_abb = case_when(
+      knowledge_area == "Project management" ~ "Proj. mgmt.",
+      knowledge_area == "Innovation management" ~ "Inn. mgmt.",
+      knowledge_area == "Business law" ~ "Bus. law",
+      knowledge_area == "Languages" ~ "Lang.",
+      knowledge_area == "Entrepreneurship" ~ "Entrep.",
+      knowledge_area == "Material science" ~ "Mat. sc.",
+      knowledge_area == "Physical chemistry" ~ "Phys. chem.",
+      knowledge_area == "Spacecraft design" ~ "Spacec. design",
+      knowledge_area == "Spacecraft propulsion" ~ "Spacec. prop.",
+      TRUE ~ knowledge_area
+    ),
+      label = case_when(
+      100*tot_credits3/sum(tot_credits1) <= 4 ~ paste0(
+        str_wrap(knowledge_area, 8),
+        "\n(ECTS: ", tot_credits3, ")"),
+      TRUE ~ paste0(
+        knowledge_area,
+        "\n(ECTS: ", tot_credits3, ")")),
+      label_nocred = case_when(
+      100*tot_credits3/sum(tot_credits1) <= 4 ~ 
+        str_wrap(knowledge_area, 8),
+      TRUE ~ knowledge_area),
+      label_abb = paste0(
+      str_replace_all(knowledge_area_abb," ", "\n"),
+      "\n(", tot_credits3, ")")
+  ) 
+  
+  if (nrow(lev3) == 1) {
+      lev3 = lev3 %>% add_row(
+        steam_factor = " ", 
+        knowledge_domain = " ",
+        knowledge_area = " ",
+        tot_credits1 = 0,
+        tot_credits2 = 0,
+        tot_credits3 = 0,
+        ymin = lev3$ymax, ymax = lev3$ymax, 
+        ylab = lev3$ylab, 
+        label = " ", label_nocred = " ",
+        color = "white"
+      )
+  }
+  
+  lev1_g = ggplot(lev1) +
+    ggtitle(str_wrap(courses_sum$label, 50)) +
+    geom_rect(
+      aes(
+        ymin = 2, ymax = 3,
+        xmin = ymin, xmax = ymax,
+        fill = color
+      ),
+      color = "white"
+    ) 
+  
+  lev1_g_label = geom_textpath(
+        data = lev1, 
+        aes(
+          label = label,
+          y = 2.5,
+          x = ylab
+        ),
+        upright = TRUE, #fontface = "bold",
+        size = 2.5, vjust = 0.5
+    ) 
+  
+  lev1_g_label_nocred = geom_textpath(
+        data = lev1,
+        aes(
+          label = label_nocred,
+          y = 2.5,
+          x = ylab
+        ),
+        upright = TRUE, #fontface = "bold",
+        size = 3/fontsizescale, vjust = 0.5
+    ) 
+  lev1_g_label_abb = geom_textpath(
+        data = lev1,
+        aes(
+          label = label_abb,
+          y = 2.5,
+          x = ylab
+        ),
+        upright = TRUE, #fontface = "bold",
+        size = 3/fontsizescale, vjust = 0.5
+    ) 
+  
+  lev2_g = geom_rect(
+      data = lev2,
+      aes(
+        ymin = 3, ymax = 4,
+        xmin = ymin, xmax = ymax,
+        fill = color
+      ),
+      color = "white"
+    ) 
+  
+  lev2_g_label = 
+    geom_textpath(
+      data = lev2,
+      aes(
+        label = label,
+        y = 3.5,
+        x = ylab
+      ),
+      upright = TRUE, #fontface = "bold",
+      size = 2.75/fontsizescale, vjust = 0.5
+    ) 
+  lev2_g_label_nocred = 
+    geom_textpath(
+      data = lev2,
+      aes(
+        label = label_nocred,
+        y = 3.5,
+        x = ylab
+      ),
+      upright = TRUE, #fontface = "bold",
+      size = 2.75/fontsizescale, vjust = 0.5
+    ) 
+  lev2_g_label_abb = 
+    geom_textpath(
+      data = lev2,
+      aes(
+        label = label_abb,
+        y = 3.5,
+        x = ylab
+      ),
+      upright = TRUE, #fontface = "bold",
+      size = 2.75/fontsizescale, vjust = 0.5
+    ) 
+  
+  lev3_g = geom_rect(
+      data = lev3,
+      aes(
+        ymin = 4, ymax = 5,
+        xmin = ymin, xmax = ymax,
+        fill = color
+      ),
+      color = "white"
+    ) 
+  
+  lev3_g_label = 
+    geom_textpath(
+      data = lev3,
+      aes(
+        label = label,
+        y = 4.5,
+        x = ylab
+      ),
+      upright = TRUE, 
+      size = 2.75/fontsizescale, vjust = 0.5,
+      text_only = TRUE
+    )
+  lev3_g_label_nocred = 
+    geom_textpath(
+      data = lev3,
+      aes(
+        label = label_nocred,
+        y = 4.5,
+        x = ylab
+      ),
+      upright = TRUE, 
+      size = 2.75/fontsizescale, vjust = 0.5,
+      text_only = TRUE
+    )
+    lev3_g_label_abb = 
+    geom_textpath(
+      data = lev3,
+      aes(
+        label = label_abb,
+        y = 4.5,
+        x = ylab
+      ),
+      upright = TRUE, 
+      size = 2.75/fontsizescale, vjust = 0.5,
+      text_only = TRUE
+    )
+  
+  g = if (labelabb == TRUE) {
+      g = if(nrow(lev2) != 0 & nrow(lev3) != 0) {
+        lev1_g + 
+        lev2_g + 
+        lev3_g +
+        lev1_g_label_abb +
+        lev2_g_label_abb +
+        lev3_g_label_abb
+      } else if (nrow(lev2) != 0 & nrow(lev3) == 0) {
+        lev1_g + 
+        lev2_g + 
+        lev1_g_label_abb +
+        lev2_g_label_abb 
+      } else {
+        lev1_g +
+        lev1_g_label_abb
+      }
+    g
+  } else if(
+    filter(
+      courses, curricula_id == id
+    )$credits_specification[1] == "Yes"
+  ) {
+      g = if(nrow(lev2) != 0 & nrow(lev3) != 0) {
+        lev1_g + 
+        lev2_g + 
+        lev3_g +
+        lev1_g_label +
+        lev2_g_label +
+        lev3_g_label
+      } else if (nrow(lev2) != 0 & nrow(lev3) == 0) {
+        lev1_g + 
+        lev2_g + 
+        lev1_g_label +
+        lev2_g_label 
+      } else {
+        lev1_g +
+        lev1_g_label
+      }
+    g
+    } else if (filter(
+      courses, curricula_id == id
+    )$credits_specification[1] == "No" ) {
+      g = if(nrow(lev2) != 0 & nrow(lev3) != 0) {
+        lev1_g + 
+        lev2_g + 
+        lev3_g +
+        lev1_g_label_nocred +
+        lev2_g_label_nocred +
+        lev3_g_label_nocred
+      } else if (nrow(lev2) != 0 & nrow(lev3) == 0) {
+        lev1_g + 
+        lev2_g + 
+        lev1_g_label_nocred +
+        lev2_g_label_nocred 
+      } else {
+        lev1_g +
+        lev1_g_label_nocred
+      }
+    g + labs(caption = "Credit information per subject\nnot available for this curricula.")
+    } else g
+  
+  g +
+    scale_fill_identity() +
+    scale_y_continuous(
+      limits = c(0,5),
+      expand = expansion(mult = c(0, -0.15))
+    ) +
+    coord_polar() +
+    theme_bw() +
+    theme(
+      text = element_text(size = 12),
+      panel.grid = element_blank(),
+      axis.text = element_blank(),
+      axis.title = element_blank(),
+      axis.ticks = element_blank(),
+      panel.border = element_blank(),
+      legend.title = element_blank(),
+      plot.title = element_text(
+        hjust = 0.5, 
+        margin = margin(0,0,0,0)
+      )
+    )
+}
+```
+
+# Sunburst - static
+
+```{r, fig.showtext=TRUE}
+# fontsizescale = 1.3
+# missing = c(3,6,26,29,34,40)
+# fontsizescale = 1.1, labelabb = TRUE
+missing = c(7,8,16,17,31,47)
+# fontsizescale = 1.4, labelabb = TRUE
+# missing = c(5)
+lapply(missing, function(x){
+# lapply(1:nrow(curricula), function(x){
+  sunburst_plot(
+    id = x,
+    fontsizescale = 1.1,
+    labelabb = TRUE
+  )
+  ggsave(
+    filename = paste0("plots/sb_curricula_", x, ".png"),
+    width = 16, height = 18.5, units = "cm", device = ragg::agg_png()
+  )
+  dev.off()
+})
+```
+ 
+ 
+# Barchart
+
+```{r, fig.showtext = TRUE}
+curricula_steamt_summary = courses %>% 
+  filter(credits_specification == "Yes") %>% 
+  mutate(
+    degree_std = case_when(str_starts(degree, "BSc") ~ "B.Sc.", TRUE ~ "M.Sc.")
+  ) %>% 
+  group_by(curricula_id, curricula_name, steam_category) %>% 
+  summarise(
+    steamt_credits = sum(credits),
+    hei_name = first(hei_name),
+    degree = first(degree_std), 
+    joint_program = first(joint_program)
+  ) %>% 
+  mutate(
+    steamt_science_share = sum(steamt_credits[steam_category=="Science"], na.rm=T)/sum(steamt_credits, na.rm=T),
+    steam_factor = fct_relevel(
+        fct_expand(
+          steam_category, 
+          "Science", "Technology", 
+          "Engineering", "Arts",
+          "Mathematics", "Transversal"
+        ),
+        "Science", "Technology", "Engineering",
+        "Arts", "Mathematics", "Transversal"
+      ),
+    color = case_when(
+      steam_category == "Science" ~ steamt_palette[1],
+      steam_category == "Technology" ~ steamt_palette[2],
+      steam_category == "Engineering" ~ steamt_palette[3],#"#0C4690",
+      steam_category == "Arts" ~ steamt_palette[4],
+      steam_category == "Mathematics" ~ steamt_palette[5],
+      steam_category == "Transversal" ~ steamt_palette[6]
+    )
+  )
+
+msc = curricula_steamt_summary %>% 
+  filter(degree == "M.Sc.", joint_program == "No") %>% 
+  mutate(
+    curricula_name = str_replace_all(curricula_name, "MSc", "M.Sc.")
+    ) %>% 
+  mutate(
+    curricula_name = str_replace_all(curricula_name, "LLM", "LL.M.")
+    )
+ggplot(msc) +
+  geom_col(
+    aes(
+      x = steamt_credits,
+      y = reorder(
+        as.factor(curricula_id),
+        steamt_science_share,
+        descending = FALSE
+      ),
+      fill = steam_factor, 
+    ), position = position_fill(reverse = TRUE)
+  ) +
+  scale_fill_manual("", values = steamt_palette) +
+  scale_x_continuous(labels = scales::percent) +
+  scale_y_discrete(
+    labels = ~ str_wrap(paste0(
+      msc$hei_name[match(.x, msc$curricula_id)],
+      " | ", 
+      msc$curricula_name[match(.x, msc$curricula_id)]
+    ), 50)
+  ) +
+  ggtitle("Masters curricula per STEAMT category") +
+  guides(
+    fill = guide_legend(
+      nrow = 1, 
+      keywidth = grid::unit(15, "mm"),
+      label.hjust = 0.5,
+      label.position = "bottom"
+  )) +
+  theme_bw() +
+  theme(
+    text = element_text(family = coorpfont, size = 11),
+    axis.title = element_blank(),
+    axis.text = element_text(size = 9),
+    legend.position = "bottom",
+    legend.justification = "right",
+    plot.title.position = "plot",
+    plot.title = element_text(hjust = 0.5)
+  ) 
+
+ggsave(filename = paste0("plots/bar_curricula_msc.png"),
+    width = 15, height = 23.3, units = "cm")
+
+msc_joint = curricula_steamt_summary %>% 
+  filter(degree == "M.Sc.", joint_program == "Yes") %>% 
+  mutate(curricula_name = str_replace_all(curricula_name, "MSc", "M.Sc."))
+ggplot(msc_joint) +
+  geom_col(
+    aes(
+      x = steamt_credits,
+      y = reorder(
+        as.factor(curricula_id),
+        steamt_science_share,
+        descending = FALSE
+      ),
+      fill = steam_factor, 
+    ), position = position_fill(reverse = TRUE)
+  ) +
+  scale_fill_manual("", values = steamt_palette, drop = FALSE) +
+  scale_x_continuous(labels = scales::percent) +
+  scale_y_discrete(
+    labels = ~ paste0(
+      str_wrap(
+        msc_joint$hei_name[match(.x, msc_joint$curricula_id)],
+        60),
+      "\n| ", 
+      str_wrap(
+        msc_joint$curricula_name[match(.x, msc_joint$curricula_id)],
+        50)
+    )
+  ) +
+  ggtitle("Joint Masters curricula per STEAMT category") +
+  guides(
+    fill = guide_legend(
+      nrow = 1, 
+      keywidth = grid::unit(15, "mm"),
+      label.hjust = 0.5,
+      label.position = "bottom"
+  )) +
+  theme_bw() +
+  theme(
+    text = element_text(family = coorpfont, size = 11),
+    axis.title = element_blank(),
+    axis.text = element_text(size = 10),
+    legend.position = "bottom",
+    legend.justification = "right",
+    plot.title.position = "plot",
+    plot.title = element_text(hjust = 0.5)
+  ) 
+
+ggsave(filename = paste0("plots/bar_curricula_msc_joint.png"),
+    width = 16.5, height = 7.5, units = "cm")
+
+bsc = curricula_steamt_summary %>% 
+  filter(degree == "B.Sc.") %>% 
+  mutate(curricula_name = str_replace_all(curricula_name, "BSc", "B.Sc."))
+ggplot(bsc) +
+  geom_col(
+    aes(
+      x = steamt_credits,
+      y = reorder(
+        as.factor(curricula_id),
+        steamt_science_share,
+        descending = FALSE
+      ),
+      fill = steam_factor, 
+    ), position = position_fill(reverse = TRUE)
+  ) +
+  scale_fill_manual("", values = steamt_palette) +
+  scale_x_continuous(labels = scales::percent) +
+  scale_y_discrete(
+    labels = ~ paste0(
+      bsc$hei_name[match(.x, bsc$curricula_id)],
+      "\n| ",
+      bsc$curricula_name[match(.x, bsc$curricula_id)]
+    )
+  ) +
+  ggtitle("Bachelors curricula per STEAMT category") +
+  guides(
+    fill = guide_legend(
+      nrow = 1, 
+      keywidth = grid::unit(15, "mm"),
+      label.hjust = 0.5,
+      label.position = "bottom"
+  )) +
+  theme_bw() +
+  theme(
+    text = element_text(family = coorpfont, size = 11),
+    axis.title = element_blank(),
+    axis.text = element_text(size = 10),
+    legend.position = "bottom",
+    legend.justification = "right",
+    plot.title.position = "plot",
+    plot.title = element_text(hjust = 0.5)
+  )
+
+ggsave(filename = paste0("plots/bar_curricula_bsc.png"),
+    width = 16.5, height = 9, units = "cm")
+
+curricula_steamt_summary %>% 
+  group_by(steam_factor, color) %>% 
+  summarise(
+    credits = sum(steamt_credits)
+  ) %>% 
+  ungroup() %>% 
+  mutate(
+    frac = credits/sum(credits),
+    ymax = cumsum(frac),
+    ymin = c(0, head(ymax, n = -1)),
+    label = paste0(
+      "<span style = 'font-family:",
+      coorpfont,";'>",
+      steam_factor,"<br>",
+      round(100*frac, 1), "%</span>"),
+    labelPosition = (ymax+ymin)/2
+  ) %>% 
+  ggplot() +
+  aes(
+    ymax = ymax, ymin = ymin,
+    xmax = 4, xmin = 3,
+    fill = steam_factor
+  ) +
+  geom_rect() +
+  geom_richtext(
+    x = 3.5,
+    aes(y = labelPosition, label = label),
+    size = 4,
+    # remove label background and outline
+    fill = NA, label.color = NA,
+    # remove label padding, since we have removed the label outline
+    label.padding = grid::unit(rep(0, 4), "pt") 
+  ) +
+  coord_polar(theta = "y") +
+  xlim(c(2, 4)) +
+  scale_fill_manual(
+    "",
+    values = steamt_palette
+  ) +
+  theme_void() +
+  theme(
+    text = element_text(
+      family = coorpfont,
+      size = 11
+    ),
+    panel.background = element_rect(
+      fill = "white", color = NA
+    ),
+    legend.position = "none"
+  ) 
+ggsave(
+  filename = "plots/doughnut_steamt.png",
+  width = 11, height = 11, units = "cm",
+  device = ragg::agg_png()
+)
+knitr::plot_crop("plots/doughnut_steamt.png")
+```
+ 
+# Knowledge domain charts
+
+```{r}
+curricula_steamt_kd_summary = courses %>% 
+  mutate(
+    degree_std = case_when(str_starts(degree, "BSc") ~ "B.Sc.", TRUE ~ "M.Sc.")
+  ) %>% 
+  # filter(degree == "MSc") %>%
+  group_by(steam_category, knowledge_domain, degree_std) %>% 
+  summarise(no_curricula = n_distinct(curricula_id)) %>%
+  mutate(
+    steam_factor = fct_relevel(
+        fct_expand(
+          steam_category, 
+          "Science", "Technology", 
+          "Engineering", "Arts",
+          "Mathematics", "Transversal"
+        ),
+        "Science", "Technology", "Engineering",
+        "Arts", "Mathematics", "Transversal"
+      )
+  )
+
+ggplot(curricula_steamt_kd_summary) +
+  geom_col(aes(
+    # y = fct_explicit_na(
+    #   reorder(knowledge_domain, no_curricula),
+    #   na_level = "Uncategorized"
+    # ),
+    y = fct_explicit_na(
+      knowledge_domain,
+      na_level = "Uncategorized"
+    ),
+    x = no_curricula,
+    fill = degree_std
+    ), 
+    # position = "stack"
+    position = position_dodge(preserve = "single")
+  ) +
+  scale_fill_manual("Degree", values = c(steamt_palette[2], steamt_palette[5])) +
+  scale_x_continuous(n.breaks = 6) +
+  scale_y_discrete(limits=rev) +
+  facet_wrap(
+    ~steam_factor,
+    scales = "free", nrow = 3
+  ) +
+  labs(title = "Number of curricula per knowledge domain") +
+  theme_bw() +
+  theme(
+    axis.title = element_blank(),
+    text = element_text(family = coorpfont, size = 11),
+    legend.position = "top",
+    legend.justification = "center",
+    plot.title = element_text(hjust = 0.5)
+  )
+
+ggsave(filename = paste0("plots/bar_knowledge_domain.png"),
+    width = 16, height = 16, units = "cm")
+
+
+curricula %>% 
+  mutate(
+    degree_std = case_when(str_starts(degree, "BSc") ~ "B.Sc.", TRUE ~ "M.Sc.")
+  ) %>% 
+  count(degree_std) %>% 
+  ggplot() +
+  aes(
+    y = degree_std,
+    x = n,
+    fill = degree_std,
+    label = scales::percent(prop.table(n))
+  ) +
+  geom_col() +
+  geom_text(nudge_x = -2, family = coorpfont) +
+  labs(title = "Number of curricula per degree type") +
+  scale_fill_manual("", values = c(steamt_palette[2], steamt_palette[5])) +
+  theme_bw() +
+  theme(
+    text = element_text(family = coorpfont, size = 11),
+    legend.position = "none",
+    axis.title = element_blank(),
+    plot.title = element_text(hjust = 0.5)
+  )
+
+ggsave(filename = paste0("plots/bar_degree.png"),
+    width = 13, height = 5, units = "cm")
+```
+
+
+ 
+## Knowledge area charts
+
+```{r}
+curricula_steamt_ka_summary = courses %>% 
+  mutate(
+    degree_std = case_when(str_starts(degree, "BSc") ~ "B.Sc.", TRUE ~ "M.Sc.")
+  ) %>% 
+  # filter(degree == "MSc") %>%
+  group_by(steam_category, knowledge_domain, knowledge_area, degree_std) %>% 
+  summarise(no_curricula = n_distinct(curricula_id)) %>%
+  mutate(
+    steam_factor = fct_relevel(
+        fct_expand(
+          steam_category, 
+          "Science", "Technology", 
+          "Engineering", "Arts",
+          "Mathematics", "Transversal"
+        ),
+        "Science", "Technology", "Engineering",
+        "Arts", "Mathematics", "Transversal"
+      )
+  )
+
+know_area_plot = function(steamtcat = "Science") {
+  curricula_steamt_ka_summary %>% 
+    filter(steam_factor == steamtcat) %>% 
+  ggplot() +
+  geom_col(aes(
+    y = fct_explicit_na(
+      reorder(knowledge_area, no_curricula),
+      na_level = "Uncategorized"
+    ),
+    x = no_curricula,
+    fill = degree_std
+    ), 
+    position = position_dodge(preserve = "single")
+  ) +
+  scale_fill_manual("Degree", values = c(steamt_palette[2], steamt_palette[5])) +
+  facet_wrap(
+    ~ knowledge_domain,
+    scales = "free"
+  ) +
+  labs(title = paste0(steamtcat, " - Number of curricula per knowledge area")) +
+  theme_bw() +
+  theme(
+    text = element_text(family = coorpfont),
+    axis.title = element_blank(),
+    axis.text = element_text(size = 9),
+    legend.position = "top",
+    legend.justification = "center",
+    plot.title = element_text(hjust = 0.5)
+  )
+
+ggsave(filename = paste0("plots/bar_knowledge_area_",steamtcat,".png"),
+    width = 20, height = 16, units = "cm")
+}
+
+know_area_plot(steamtcat = "Science")
+know_area_plot(steamtcat = "Technology")
+know_area_plot(steamtcat = "Engineering")
+know_area_plot(steamtcat = "Arts")
+know_area_plot(steamtcat = "Mathematics")
+know_area_plot(steamtcat = "Transversal")
+```
+
+# Map
+
+```{r}
+library(rnaturalearth)
+countries = ne_countries(returnclass = "sf", scale = "large")
+crs = "+proj=natearth2 +datum=WGS84 +no_defs +over"
+crs_eu = 3035
+zoom_buffer = st_sfc(
+  st_point(c(4,53)),
+  crs = 4326
+) %>% 
+  st_transform(crs_eu) %>% 
+  st_buffer(2200000) %>% 
+  st_bbox() %>% 
+  st_as_sfc()
+```
+
+```{r}
+hei_curricula = hei_sf %>% 
+  left_join(curricula)
+curricula_country = hei_curricula %>% 
+  mutate(coutry = case_when(
+    country == "US" ~ "Unites States of America", 
+    TRUE ~ country
+  )) %>% 
+  count(country) %>% 
+  st_drop_geometry() %>% 
+  left_join(select(countries, country = name_en)) %>% 
+  st_as_sf()
+curricula_hei = curricula %>% 
+  full_join(hei_sf) %>% 
+  count(hei_id) %>% 
+  left_join(hei_sf) %>%
+  st_as_sf()
+```
+
+```{r}
+ggplot() +
+  geom_sf(
+    data = countries,
+    fill = steamt_palette[4],
+    color = NA
+  ) +
+  theme_void() +
+  theme(
+    text = element_text(family = coorpfont),
+    panel.background = element_rect(
+      fill = "white", color = NA,
+    ),
+    panel.border = element_rect(
+      fill = NA, color = "black", size = 1
+    ),
+    legend.position = c(0.1,0.5)
+  ) +
+  geom_sf(
+    data = curricula_country,
+    aes(fill = n), color = NA
+  ) +
+  geom_sf(
+    data = st_jitter(curricula_hei, factor = 0.001), 
+    shape = 21, stroke = 0.5, 
+    alpha = 0.8,
+    fill = "grey30",
+    color = "white",
+    aes(size = n)
+  ) +
+  scale_fill_gradient2(
+    "No. of\ncurricula\nper country",
+    low = steamt_palette[3], 
+    mid = steamt_palette[1], 
+    high = steamt_palette[6],
+    midpoint = 4, 
+    n.breaks = 8
+  ) +
+  scale_size(
+    "No. of\ncurricula\nper HEI",
+    range = c(2,4),
+    breaks = c(1,2)
+  ) +
+  guides(size = guide_legend(order = 2),
+         fill = guide_legend(order = 1)) +
+  coord_sf(
+    crs = crs_eu, expand = FALSE, clip = "on",
+    xlim = c(
+      st_bbox(st_transform(zoom_buffer, crs_eu))['xmin'],
+      st_bbox(st_transform(zoom_buffer, crs_eu))['xmax']
+    ),
+    ylim = c(
+      st_bbox(st_transform(zoom_buffer, crs_eu))['ymin'],
+      st_bbox(st_transform(zoom_buffer, crs_eu))['ymax']
+    )
+  ) 
+
+ggsave(filename = "plots/map_eu_uk.png",
+    width = 13, height = 13, units = "cm")
+```
+
+# Table 
+
+```{r}
+curr_list = curricula %>% 
+  left_join(hei) %>% 
+  mutate(
+     degree_std = case_when(str_starts(degree, "BSc") ~ "BSc", TRUE ~ "MSc"),
+    country = case_when(
+      country == "UK" ~ "United Kingdom", 
+      country == "US" ~ "U.S.A.", 
+      TRUE ~ country
+    )
+  ) %>% 
+  select(curricula_name, hei_name, degree_std, city, country)
+
+curr_list %>% 
+  write_excel_csv(file = "plots/curricula_list.csv")
+```
+
