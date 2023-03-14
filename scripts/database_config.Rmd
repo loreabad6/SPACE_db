@@ -32,10 +32,10 @@ library(RPostgres)
 
 Here the details of the database can be changed: 
 ```{r conn_details, eval = TRUE}
-db_name = "starsEU"
-local_host = "localhost"
+db_name = "starseu_spacedb"
+local_host = "postgresql-starseu.alwaysdata.net"
 port_num = 5432
-user_name = "postgres"
+user_name = "starseu"
 ```
 
 To test connection we will try to fetch the `test` table, created during the pre-requisites (see above). 
@@ -94,11 +94,7 @@ CREATE TABLE curricula (
     reflink2 TEXT,
     joint_program TEXT,
     credits_specification TEXT,
-    PRIMARY KEY(curricula_id),
-    CONSTRAINT fk_hei
-      FOREIGN KEY(hei_id)
-        REFERENCES hei(hei_id)
-        ON DELETE SET NULL
+    PRIMARY KEY(curricula_id)
 );
 ```
 

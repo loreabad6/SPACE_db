@@ -258,10 +258,10 @@ We will proceed to populate the tables on the database below:
 ```{r conn_details, eval = TRUE}
 library(DBI)
 library(RPostgres)
-db_name = "starsEU"
-local_host = "localhost"
+db_name = "starseu_spacedb"
+local_host = "postgresql-starseu.alwaysdata.net"
 port_num = 5432
-user_name = "postgres"
+user_name = "starseu"
 ## Create connection to DB
 connection = dbConnect(
   Postgres(), 
@@ -270,13 +270,6 @@ connection = dbConnect(
   port = port_num,
   user = user_name, 
   password = rstudioapi::askForPassword("Database password")
-)
-
-## Test if connection is successful
-ifelse(
-  !dbExistsTable(connection, "test"),
-  "The connection to the database was not possible.",
-  "The connection to the database was successful!"
 )
 ```
 
@@ -319,6 +312,11 @@ dbWriteTable(connection, "courses",
              courses_df, append = TRUE, row.names = FALSE)
 ```
 
+```{sql, connection = connection}
+ALTER TABLE curricula ADD CONSTRAINT fk_hei FOREIGN KEY(hei_id) REFERENCES hei(hei_id) ON DELETE SET NULL;
+```
+
 ```{r}
 dbDisconnect(connection)
 ```
+

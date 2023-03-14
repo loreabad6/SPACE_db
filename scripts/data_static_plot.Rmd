@@ -23,10 +23,10 @@ We will first, as usual, connect to the database to be able to access the create
 ```{r conn_details, eval = TRUE, message = FALSE, warning = FALSE}
 library(DBI)
 library(RPostgres)
-db_name = "starsEU"
-local_host = "localhost"
+db_name = "starseu_spacedb"
+local_host = "postgresql-starseu.alwaysdata.net"
 port_num = 5432
-user_name = "postgres"
+user_name = "starseu"
 ## Create connection to DB
 connection = dbConnect(
   Postgres(), 
@@ -567,7 +567,7 @@ lapply(missing, function(x){
     labelabb = TRUE
   )
   ggsave(
-    filename = paste0("plots/sb_curricula_", x, ".png"),
+    filename = paste0("plots/sb_curricula_x", x, ".png"),
     width = 16, height = 18.5, units = "cm", device = ragg::agg_png()
   )
   dev.off()
